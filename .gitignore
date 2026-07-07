@@ -1,0 +1,139 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+pip-wheel-metadata/
+share/python-wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
+
+# Virtual Environments
+venv/
+env/
+ENV/
+.venv
+env.bak/
+venv.bak/
+.env
+.env.local
+
+# IDE and Editors
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.sublime-project
+.sublime-workspace
+*.code-workspace
+.DS_Store
+Thumbs.db
+
+# Streamlit
+.streamlit/
+
+# Vector Database
+
+
+# Images and Extracted Files
+
+
+# PDFs (source files - optional to exclude)
+# Uncomment if you want to exclude PDFs
+# *.pdf
+
+# Logs
+*.log
+logs/
+
+# Pytest
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Jupyter
+.ipynb_checkpoints/
+*.ipynb
+
+# LLM Models (optional)
+# models/
+# ollama/
+
+# Temporary files
+*.tmp
+*.temp
+.tmp/
+
+# OS files
+.DS_Store
+Thumbs.db
+*.lnk
+
+# Backup files
+*.bak
+*.backup
+*~
+
+# Cache
+.cache/
+*.cache
+
+# Node modules (if using any JavaScript tools)
+node_modules/
+
+# IDE specific
+*.iml
+*.xml
+*.properties
+
+# MacOS
+.AppleDouble
+.LSOverride
+*.app
+
+# Windows
+*.exe
+*.dll
+*.so
+*.dylib
+
+# Project specific
+# Keep source manuals but ignore generated files
+manual/*.pkl
+manual/*.cache
+manual/*
+
+# Credentials (never commit these)
+.credentials
+credentials.json
+secrets.json
+apikeys.txt
+
+# Distribution files
+*.whl
+*.tar.gz
+*.zip
+
+# Database files
+
+
+# Miscellaneous
+.env.example
+.envrc
+direnv.allow
