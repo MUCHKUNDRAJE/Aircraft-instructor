@@ -6,7 +6,12 @@ from agents.parts_recommendation_agent import recommend_parts
 from agents.digital_twin_agent import build_digital_twin
 
 
-def run_agent_pipeline(query: str, sensor_data: dict, aircraft_info: dict) -> dict:
+def run_agent_pipeline(
+    query: str,
+    sensor_data: dict,
+    aircraft_info: dict,
+    conversation_context: str = "No prior conversation history.",
+) -> dict:
     """
     Runs the full multi-agent pipeline in sequence:
     Fault Diagnosis -> Safety & Compliance -> Predictive Maintenance
@@ -17,28 +22,24 @@ def run_agent_pipeline(query: str, sensor_data: dict, aircraft_info: dict) -> di
     manual_key = route_query(query)
     print(f"[LOG] [Orchestrator] Routed to manual: '{manual_key}'")
 
-    print(f"\n[LOG] [Orchestrator] Agent 1: Initializing Fault Diagnosis...")
-    fault_diagnosis = diagnose_fault(query, manual_key, sensor_data)
-    print(f"[LOG] [Orchestrator] Agent 1: Fault Diagnosis complete")
-    
-    print(f"[LOG] [Orchestrator] Agent 2: Initializing Safety & Compliance...")
+    print(f"[LOG] [Orchestrator] Agent 1: Fault Diagnosis...")
+    fault_diagnosis = diagnose_fault(query, manual_key, sensor_data, conversation_context)
+
+    print(f"[LOG] [Orchestrator] Agent 2: Safety & Compliance...")
     safety = check_safety_compliance(fault_diagnosis, manual_key)
-    print(f"[LOG] [Orchestrator] Agent 2: Safety & Compliance complete")
-    
-    print(f"[LOG] [Orchestrator] Agent 3: Initializing Predictive Maintenance...")
+
+    print(f"[LOG] [Orchestrator] Agent 3: Predictive Maintenance...")
     predictive = predict_maintenance(query, fault_diagnosis, sensor_data)
-    print(f"[LOG] [Orchestrator] Agent 3: Predictive Maintenance complete")
-    
-    print(f"[LOG] [Orchestrator] Agent 4: Initializing Parts Recommendation...")
+
+    print(f"[LOG] [Orchestrator] Agent 4: Parts Recommendation...")
     parts = recommend_parts(
         fault_diagnosis,
         aircraft_info.get("aircraft_model", "Unknown"),
         aircraft_info.get("engine_model", "Unknown"),
         manual_key,
     )
-    print(f"[LOG] [Orchestrator] Agent 4: Parts Recommendation complete")
-    
-    print(f"[LOG] [Orchestrator] Agent 5: Initializing Digital Twin...")
+
+    print(f"[LOG] [Orchestrator] Agent 5: Digital Twin...")
     digital_twin = build_digital_twin(
         aircraft_info.get("aircraft_model", "Unknown"),
         aircraft_info.get("engine_model", "Unknown"),
@@ -48,9 +49,6 @@ def run_agent_pipeline(query: str, sensor_data: dict, aircraft_info: dict) -> di
         predictive,
         parts,
     )
-    print(f"[LOG] [Orchestrator] Agent 5: Digital Twin complete")
-    
-    print(f"[LOG] [Orchestrator] All agents complete - aggregating results...")
 
     print(f"[LOG] [Orchestrator] All agents complete - aggregating results...")
 

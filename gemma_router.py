@@ -50,21 +50,27 @@ def _generate(prompt: str) -> str:
     return response["message"]["content"].strip()
 
 
-def answer_query(query: str, context: str) -> str:
+def answer_query(query: str, context: str, conversation_context: str = "No prior conversation history.") -> str:
     """
-    Given retrieved chunks (context) and the original query, asks the model
-    to produce a well-written, grounded paragraph answer.
+    Given retrieved chunks (context), the original query, and prior
+    conversation context (if any), asks the model to produce a well-written,
+    grounded paragraph answer.
     """
     prompt = (
         "You are an experienced aircraft maintenance instructor explaining a "
-        "procedure to a technician. Using ONLY the context below, write a clear, "
-        "well-organized answer in flowing paragraphs (not bullet points or a "
-        "numbered list unless the source itself describes numbered steps). "
-        "Explain the reasoning and any important safety notes, not just a bare fact. "
-        "If the context doesn't contain enough information to answer fully, say so "
-        "honestly and explain what is missing.\n\n"
-        f"Context:\n{context}\n\n"
+        "procedure to a technician. Using ONLY the manual context below, write "
+        "a clear, well-organized answer in flowing paragraphs (not bullet points "
+        "or a numbered list unless the source itself describes numbered steps). "
+        "Explain the reasoning and any important safety notes, not just a bare "
+        "fact. If the context doesn't contain enough information to answer "
+        "fully, say so honestly and explain what is missing.\n\n"
+        f"Prior conversation context (may be empty):\n{conversation_context}\n\n"
+        "If the current question refers back to something discussed earlier "
+        "(e.g. 'that same part', 'the procedure you mentioned'), use that "
+        "context — otherwise treat this as a fresh question.\n\n"
+        f"Manual context:\n{context}\n\n"
         f"Question: {query}\n\n"
-        "Answer (in paragraph form):"
+        "Answer (in the markdown form )"
     )
+    print( " Context of the prompt - " , conversation_context)
     return _generate(prompt)

@@ -1,5 +1,10 @@
 import os
-print("[LOG] Initializing modules...")
+from typing import Optional
+
+from fastapi import FastAPI, HTTPException
+from fastapi.middleware.cors import CORSMiddleware
+from pydantic import BaseModel
+
 from pdf_tools import (
     ingest_pdf_to_vector_db,
     search_manuals,
@@ -7,185 +12,218 @@ from pdf_tools import (
     MANUAL_DIR,
     MANUAL_REGISTRY,
 )
-print("[LOG] PDF tools imported successfully")
 from gemma_router import route_query, answer_query
-print("[LOG] Gemma router imported successfully")
 from agents.orchestrator import run_agent_pipeline
-print("[LOG] Agent orchestrator imported successfully")
+from memory import conversation_memory
+
+app = FastAPI(title="Aircraft Maintenance API", version="1.0")
+
+# Allow the frontend (any origin during dev — tighten this for production)
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 
-def ingest_all_manuals():
-    print(f"[LOG] ingest_all_manuals() called")
-    print(f"[LOG] Found {len(MANUAL_REGISTRY)} manual(s) to ingest")
-    for key, meta in MANUAL_REGISTRY.items():
-        print(f"\n[LOG] Ingesting: {meta['file']} -> DB '{key}'")
-        print(f"[LOG] Description: {meta['description']}")
-        print(f"[LOG] Two-column layout: {meta['two_column']}")
-        result = ingest_pdf_to_vector_db.invoke({"pdf_filename": meta["file"]})
-        print(f"[LOG] Result: {result}")
-    print(f"[LOG] All manuals ingestion complete")
+# ---------------------------------------------------------------------------
+# Request / response models
+# ---------------------------------------------------------------------------
+class AskRequest(BaseModel):
+    query: str
+    session_id: str = "default"
+    use_agents: bool = False
+    sensor_data: Optional[dict] = None
+    aircraft_info: Optional[dict] = None
 
 
-def show_ingested_manuals():
-    print(f"\n[LOG] show_ingested_manuals() called")
-    print("[LOG] Retrieving ingested manuals list...")
-    result = list_ingested_manuals.invoke({})
-    print(f"[LOG] Ingested manuals:\n{result}")
-    print("[LOG] Manuals display complete\n")
+class QAHistoryResponse(BaseModel):
+    session_id: str
+    turn_count: int
+    history: list[QAItem]
 
 
-def ask(query: str, use_agents: bool = False, sensor_data: dict = None, aircraft_info: dict = None):
-    """
-    use_agents=True  -> runs the full multi-agent pipeline (Fault Diagnosis,
-                         Safety & Compliance, Predictive Maintenance,
-                         Parts Recommendation, Digital Twin) and prints a
-                         structured report.
-    use_agents=False -> (default) simple single-model RAG answer: routes to
-                         the best manual, retrieves context, asks the local
-                         LLM for a plain paragraph answer.
-    """
-    print(f"\n[LOG] ask() called with query: '{query}'")
-    print(f"[LOG] Parameters: use_agents={use_agents}")
+class IngestRequest(BaseModel):
+    manual_key: str
+
+
+DEFAULT_SENSOR_DATA = {
+    "engine_temp": "simulated: 640°C (rising)",
+    "oil_pressure": "simulated: 42 psi (below nominal)",
+    "vibration": "simulated: 2.8 IPS (elevated)",
+    "fault_codes": "simulated: none reported",
+    "maintenance_history": "simulated: last inspected 120 flight hours ago",
+    "operating_hours": "simulated: 8,400",
+    "flight_cycles": "simulated: 3,150",
+}
+
+DEFAULT_AIRCRAFT_INFO = {
+    "aircraft_model": "Boeing 737-800",
+    "engine_model": "CFM56-7B",
+}
+
+
+# ---------------------------------------------------------------------------
+# Core ask logic (used by the /ask endpoint)
+# ---------------------------------------------------------------------------
+def ask(
+    query: str,
+    session_id: str = "default",
+    use_agents: bool = False,
+    sensor_data: dict = None,
+    aircraft_info: dict = None,
+) -> dict:
+    print(f"\n[LOG] ask() called: session_id='{session_id}', query='{query}', use_agents={use_agents}")
 
     if use_agents:
-        print(f"[LOG] Multi-agent pipeline mode enabled")
-        print(f"[LOG] Initializing sensor data...")
-        sensor_data = sensor_data or {
-            "engine_temp": "simulated: 640°C (rising)",
-            "oil_pressure": "simulated: 42 psi (below nominal)",
-            "vibration": "simulated: 2.8 IPS (elevated)",
-            "fault_codes": "simulated: none reported",
-            "maintenance_history": "simulated: last inspected 120 flight hours ago",
-            "operating_hours": "simulated: 8,400",
-            "flight_cycles": "simulated: 3,150",
-        }
-        print(f"[LOG] Sensor data initialized: {len(sensor_data)} parameters")
-        
-        print(f"[LOG] Initializing aircraft info...")
-        aircraft_info = aircraft_info or {
-            "aircraft_model": "Boeing 737-800",
-            "engine_model": "CFM56-7B",
-        }
-        print(f"[LOG] Aircraft info initialized: {aircraft_info}")
+        direct = conversation_memory.try_direct_answer(session_id, query)
+        if direct:
+            print(f"[LOG] [Memory] Answered directly from stored last turn.")
+            return {"mode": "direct_memory_answer", "answer": direct}
 
-        print(f"[LOG] Starting agent pipeline execution...")
-        report = run_agent_pipeline(query, sensor_data, aircraft_info)
-        print(f"[LOG] Agent pipeline execution complete")
+        conversation_context = conversation_memory.get_relevant_context(session_id, query)
 
-        print("\n[LOG] =================== MULTI-AGENT REPORT ===================")
-        print(f"[LOG] Routed Manual: {report['manual_key']}")
+        sensor_data = sensor_data or DEFAULT_SENSOR_DATA
+        aircraft_info = aircraft_info or DEFAULT_AIRCRAFT_INFO
 
-        fd = report["fault_diagnosis"]
-        print("[LOG] \n[Fault Diagnosis]")
-        print(f"[LOG]   Probable Fault: {fd.get('probable_fault')}")
-        print(f"[LOG]   Root Cause: {fd.get('root_cause')}")
-        print(f"[LOG]   Confidence: {fd.get('confidence_percent')}%")
-        print(f"[LOG]   Affected Component: {fd.get('affected_component')}")
+        report = run_agent_pipeline(query, sensor_data, aircraft_info, conversation_context)
 
-        sc = report["safety_compliance"]
-        print("[LOG] \n[Safety & Compliance]")
-        print(f"[LOG]   Safety Status: {sc.get('safety_status')}")
-        print(f"[LOG]   Warnings: {sc.get('warnings')}")
-        print(f"[LOG]   Applicable Regulations: {sc.get('applicable_regulations')}")
-        print(f"[LOG]   Notes: {sc.get('compliance_notes')}")
+        conversation_memory.add_turn(session_id, query, report, mode="multi_agent")
 
-        pm = report["predictive_maintenance"]
-        print("[LOG] \n[Predictive Maintenance]")
-        print(f"[LOG]   Health Score: {pm.get('health_score_percent')}%")
-        print(f"[LOG]   Remaining Useful Life: {pm.get('remaining_useful_life_hours')} flight hours")
-        print(f"[LOG]   Failure Probability: {pm.get('failure_probability_percent')}%")
-        print(f"[LOG]   Recommendation: {pm.get('maintenance_recommendation')}")
-
-        pr = report["parts_recommendation"]
-        print("[LOG] \n[Parts Recommendation]")
-        print(f"[LOG]   Part Number: {pr.get('part_number')}")
-        print(f"[LOG]   Description: {pr.get('part_description')}")
-        print(f"[LOG]   Quantity Required: {pr.get('quantity_required')}")
-        print(f"[LOG]   Alternatives: {pr.get('alternative_part_numbers')}")
-
-        dt = report["digital_twin"]
-        print("[LOG] \n[Digital Twin]")
-        print(f"[LOG]   Overall Status: {dt.get('overall_status')}")
-        print(f"[LOG]   Summary: {dt.get('twin_summary')}")
-        print("[LOG] ============================================================\n")
-
-        return report
+        return {"mode": "multi_agent", "report": report}
 
     else:
-        print(f"[LOG] Simple RAG mode - routing query to appropriate manual")
-        print(f"[LOG] Calling router to determine best manual...")
+        # Simple RAG — now also memory-aware
+        conversation_context = conversation_memory.get_relevant_context(session_id, query)
+
         manual_key = route_query(query)
-        print(f"[LOG] Router selected manual: {manual_key}")
-
-        print(f"[LOG] Retrieving context from '{manual_key}'...")
         raw_results = search_manuals.invoke({"query": query, "manual_key": manual_key})
-        print(f"[LOG] Retrieved {len(raw_results.split('Match'))-1} search results from '{manual_key}'")
-        print(f"\n[LOG] Context retrieved:\n{raw_results}\n")
+        final_answer = answer_query(query, raw_results, conversation_context)
 
-        print(f"[LOG] Generating LLM answer based on context...")
-        final_answer = answer_query(query, raw_results)
-        print(f"[LOG] Answer generated successfully")
-        print(f"[LOG] Answer:\n{final_answer}\n")
-        return final_answer
+        conversation_memory.add_turn(
+            session_id,
+            query,
+            {"manual_key": manual_key, "answer": final_answer},
+            mode="simple_rag",
+        )
+
+        return {
+            "mode": "simple_rag",
+            "manual_key": manual_key,
+            "context": raw_results,
+            "answer": final_answer,
+        }
+
+# ---------------------------------------------------------------------------
+# Endpoints
+# ---------------------------------------------------------------------------
+@app.get("/")
+def root():
+    return {"status": "ok", "service": "Aircraft Maintenance API"}
 
 
-def main():
-    print("\n" + "="*70)
-    print("[LOG] ====== AIRCRAFT MANUAL DEMO (MULTI-DB + MULTI-AGENT SYSTEM) ======")
-    print("="*70)
-    
-    print(f"[LOG] Initializing application...")
-    print(f"[LOG] Creating manual directory: {MANUAL_DIR}")
-    os.makedirs(MANUAL_DIR, exist_ok=True)
-    print(f"[LOG] Manual directory ready")
+@app.post("/ask")
+def ask_endpoint(payload: AskRequest):
+    """
+    Main endpoint the frontend calls. `use_agents` decides the path:
+    true  -> full multi-agent pipeline (with session memory + SQLite persistence)
+    false -> simple RAG answer (no agent memory involved)
+    """
+    try:
+        result = ask(
+            query=payload.query,
+            session_id=payload.session_id,
+            use_agents=payload.use_agents,
+            sensor_data=payload.sensor_data,
+            aircraft_info=payload.aircraft_info,
+        )
+        return result
+    except Exception as e:
+        print(f"[ERROR] /ask failed: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
 
- 
 
-    print(f"\n[LOG] Phase 3: Single-model RAG test")
-    print(f"[LOG] Test query: 'How do I replace the engine oil filter ?'")
-    ask("How do I replace the engine oil filter ?")
 
-    print(f"\n[LOG] Phase 4: Multi-agent pipeline test")
-    print(f"[LOG] Test query: 'Engine #3 temperature is increasing rapidly.'")
-    ask("""Aircraft:
-Boeing 737-800
+@app.get("/qa-history/{session_id}")
+def get_qa_history(session_id: str):
+    """
+    Returns a clean list of {query, answer} pairs for this session, in
+    order — no embeddings, no full report JSON. `answer` is the exact text
+    the LLM generated (the RAG answer, or the multi-agent Digital Twin's
+    narrative summary).
+    """
+    try:
+        qa_list = conversation_memory.get_qa_history(session_id)
+        return {"session_id": session_id, "qa_pairs": qa_list}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
 
-During pre-flight inspection, engineers observed:
 
-Fuel smell near the left engine.
+@app.get("/history/{session_id}")
+def get_history(session_id: str):
+    """Returns the full stored conversation/report history for a session."""
+    try:
+        history = conversation_memory.get_history(session_id)
+        return {"session_id": session_id, "turns": history}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
 
-Fuel pressure fluctuates between 48 psi and 63 psi.
 
-Fuel flow is unstable.
+@app.delete("/history/{session_id}")
+def clear_history(session_id: str):
+    """Clears a session's stored history (e.g. user starts a new chat)."""
+    try:
+        conversation_memory.clear_session(session_id)
+        return {"status": "cleared", "session_id": session_id}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
 
-Temperature remains normal.
 
-No fault codes are displayed.
+@app.get("/manuals")
+def get_manuals():
+    """Lists registered manuals and their ingestion status."""
+    try:
+        ingested = list_ingested_manuals.invoke({})
+        return {
+            "registry": {
+                key: {"file": meta["file"], "description": meta["description"]}
+                for key, meta in MANUAL_REGISTRY.items()
+            },
+            "ingested_status": ingested,
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
 
-The aircraft completed 8 consecutive short-haul flights in the last 24 hours.
 
-Perform a complete diagnosis.
+@app.post("/ingest")
+def ingest_manual(payload: IngestRequest):
+    """Ingests a single manual (by its MANUAL_REGISTRY key) into its Chroma DB."""
+    if payload.manual_key not in MANUAL_REGISTRY:
+        raise HTTPException(status_code=404, detail=f"Unknown manual_key '{payload.manual_key}'")
+    try:
+        result = ingest_pdf_to_vector_db.invoke({
+            "pdf_filename": MANUAL_REGISTRY[payload.manual_key]["file"]
+        })
+        return {"result": result}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
 
-Determine:
 
-• Root cause
-• Required maintenance procedure
-• Safety precautions
-• Replacement parts
-• Risk of continuing operation
-• Remaining Useful Life of the fuel pump
-• Simulate the next 10 flight cycles.
-""", use_agents=True)
-    
-    print(f"[LOG] ====== APPLICATION EXECUTION COMPLETE ======")
+@app.post("/ingest-all")
+def ingest_all():
+    """Ingests every manual currently in MANUAL_REGISTRY."""
+    results = {}
+    for key, meta in MANUAL_REGISTRY.items():
+        try:
+            results[key] = ingest_pdf_to_vector_db.invoke({"pdf_filename": meta["file"]})
+        except Exception as e:
+            results[key] = f"Error: {e}"
+    return {"results": results}
 
 
 if __name__ == "__main__":
-    try:
-        print("[LOG] Application startup...")
-        main()
-        print("[LOG] Application completed successfully")
-    except Exception as e:
-        print(f"[ERROR] Application failed: {e}")
-        import traceback
-        traceback.print_exc()
+    import uvicorn
+    os.makedirs(MANUAL_DIR, exist_ok=True)
+    uvicorn.run("app:app", host="0.0.0.0", port=8000, reload=True)

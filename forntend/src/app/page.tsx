@@ -1,6 +1,7 @@
 "use client"
 import { motion, AnimatePresence } from "framer-motion";
 import { useState, useEffect, useRef, createContext, useContext } from "react"
+
 import {
   Plus,
   MessageSquare,
@@ -45,6 +46,12 @@ import {
 import { Button } from "@/components/ui/button"
 import { cn } from "@/lib/utils"
 import { Skeleton } from "@/components/ui/skeleton";
+import ReportDisplay from "@/components/shared/ReportDisplay"
+import { askInstructorAgent,  getQaHistory, historyEntryToReport , type AskApiResponse } from "@/lib/instructorApi"
+
+
+
+
 
 // ─── Color tokens ─────────────────────────────────────────────────────────────
 // Dark mode keeps the original palette exactly as it was.
@@ -92,6 +99,14 @@ type ColorTokens = {
   sub: string
   border: string
   cardBorder: string
+}
+
+type ChatMessage = {
+  id: string
+  role: "user" | "assistant"
+  content: string
+  status?: "loading" | "done" | "error"
+  report?: AskApiResponse   // add this
 }
 
 type ThemeMode = "light" | "dark"
@@ -819,7 +834,49 @@ function ChatMain() {
   const [messages, setMessages] = useState<ChatMessage[]>([])
   const [loading, setLoading] = useState(false)
   const [isExpanded, setIsExpanded] = useState(false)
+  const [historyLoaded, setHistoryLoaded] = useState(false)
   const scrollRef = useRef<HTMLDivElement>(null)
+  const sessionIdRef = useRef(`session-${Date.now()}`)
+
+  // ─── Load past conversation for this session, if it exists ─────────────────
+  useEffect(() => {
+    let cancelled = false
+
+    async function loadHistory() {
+      try {
+        const data = await getQaHistory(sessionIdRef.current)
+        if (cancelled || !data.qa_pairs?.length) return
+
+        const rehydrated: ChatMessage[] = data.qa_pairs.flatMap((entry) => {
+          const userMsg: ChatMessage = {
+            id: `hist-u-${entry.id}`,
+            role: "user",
+            content: entry.query,
+          }
+          const assistantMsg: ChatMessage = {
+            id: `hist-a-${entry.id}`,
+            role: "assistant",
+            content: entry.answer.summary,
+            status: "done",
+            report: historyEntryToReport(entry),
+          }
+          return [userMsg, assistantMsg]
+        })
+
+        setMessages(rehydrated)
+        setIsExpanded(true)
+      } catch {
+        // No history for this session yet — that's fine, start fresh.
+      } finally {
+        if (!cancelled) setHistoryLoaded(true)
+      }
+    }
+
+    loadHistory()
+    return () => {
+      cancelled = true
+    }
+  }, [])
 
   useEffect(() => {
     if (scrollRef.current) {
@@ -829,7 +886,7 @@ function ChatMain() {
 
   const handleAsk = async () => {
     const question = input.trim()
-    if (!question || loading) return
+    if (!question) return
 
     const userMsgId = `u-${Date.now()}`
     const assistantMsgId = `a-${Date.now()}`
@@ -839,51 +896,38 @@ function ChatMain() {
       { id: userMsgId, role: "user", content: question },
       { id: assistantMsgId, role: "assistant", content: "", status: "loading" },
     ])
-    setIsExpanded(true)
+
     setInput("")
+    setIsExpanded(true)
     setLoading(true)
 
     try {
-      const response = await fetch("http://localhost:11434/api/chat", {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify({
-          model: "gemma3:1b", // or gemma3:4b, phi4:latest, llama3.1:8b
-          messages: [
-            {
-              role: "system",
-              content:
-                "You are an aircraft maintenance instructor agent. Always answer in Markdown. Use headings, bullet lists, tables when appropriate, and keep answers concise.",
-            },
-            {
-              role: "user",
-              content: question,
-            },
-          ],
-          stream: false,
+      const data = await askInstructorAgent({
+        query: question,
+        session_id: sessionIdRef.current,
+        use_agents: agentsOn,
+        ...(agentsOn && {
+          sensor_data: {
+            engine_temp: "normal, 480°C",
+            oil_pressure: "58 psi",
+            vibration: "1.2 IPS",
+            fault_codes: "none reported",
+            maintenance_history: "last inspected 40 flight hours ago",
+            operating_hours: "6200",
+            flight_cycles: "2100",
+          },
+          aircraft_info: { aircraft_model: "Boeing 737-800", engine_model: "CFM56-7B" },
         }),
       })
 
-      if (!response.ok) {
-        throw new Error(`Request failed with status ${response.status}`)
-      }
-
-      const data = await response.json()
-
       setMessages((prev) =>
-        prev.map((m) =>
-          m.id === assistantMsgId
-            ? { ...m, content: data.message.content || "No response was returned.", status: "done" }
-            : m
-        )
+        prev.map((m) => (m.id === assistantMsgId ? { ...m, report: data, status: "done" } : m))
       )
     } catch (err) {
       setMessages((prev) =>
         prev.map((m) =>
           m.id === assistantMsgId
-            ? { ...m, content: "Couldn't reach the instructor agent. Please try again.", status: "error" }
+            ? { ...m, content: "Couldn't reach the instructor agent.", status: "error" }
             : m
         )
       )
@@ -995,32 +1039,24 @@ function ChatMain() {
 
   return (
     <main className="flex-1 flex flex-col relative overflow-hidden" style={{ background: C.bg }}>
-      {/* Subtle background */}
       <div className="absolute inset-0 pointer-events-none" style={{ background: `radial-gradient(ellipse 60% 40% at 50% 30%, ${C.accent}08 0%, transparent 70%)` }} />
 
-      {/* Top bar */}
       <div className="relative z-10 flex items-center px-5 py-3" style={{ borderBottom: `1px solid rgba(255,255,255,0.04)` }}>
         <SidebarTrigger className="h-7 w-7 rounded-lg" style={{ color: C.sub }} />
         <div className="flex items-center gap-2 ml-3">
           <Plane className="h-3.5 w-3.5" style={{ color: C.accent }} />
-          <span className="text-xs font-semibold" style={{ color: C.sub }}>
-          AeroIntel AI
-          </span>
+          <span className="text-xs font-semibold" style={{ color: C.sub }}>AeroIntel AI</span>
           <span style={{ color: `${C.sub}40` }}>/</span>
-          <span className="text-xs font-semibold" style={{ color: C.text }}>
-            Active Session
-          </span>
+          <span className="text-xs font-semibold" style={{ color: C.text }}>Active Session</span>
         </div>
         <div className="ml-auto">
           <ThemeToggle />
         </div>
       </div>
 
-      {/* Body: either the centered hero+input (pre-chat) or the message list + docked input (post-chat) */}
       <div className="relative z-10 flex-1 flex flex-col overflow-hidden">
         <AnimatePresence mode="wait">
           {!isExpanded ? (
-            // ── Pre-chat hero state ──────────────────────────────────────────
             <motion.div
               key="hero"
               initial={{ opacity: 1 }}
@@ -1032,11 +1068,7 @@ function ChatMain() {
                   <div className="flex items-center gap-3 mb-3">
                     <div
                       className="h-10 w-10 rounded-xl flex items-center justify-center"
-                      style={{
-                        background: `${C.accent}18`,
-                        border: `1px solid ${C.accent}30`,
-                        boxShadow: `0 0 20px ${C.accent}20`,
-                      }}
+                      style={{ background: `${C.accent}18`, border: `1px solid ${C.accent}30`, boxShadow: `0 0 20px ${C.accent}20` }}
                     >
                       <Plane className="h-5 w-5" style={{ color: C.accent }} />
                     </div>
@@ -1050,21 +1082,14 @@ function ChatMain() {
                     Welcome to AeroIntel AI
                   </h1>
                   <p className="text-sm leading-relaxed" style={{ color: C.sub }}>
-                   AeroIntel AI is an offline, multi-agent maintenance assistant for aircraft engineers — it diagnoses engine faults, analyzes live sensor telemetry, and predicts component failures. Powered by AI agents and RAG, it retrieves maintenance procedures and generates explainable, safety-focused reports, all without needing an internet connection.
-
-
+                    AeroIntel AI is an offline, multi-agent maintenance assistant for aircraft engineers — it diagnoses engine faults, analyzes live sensor telemetry, and predicts component failures. Powered by AI agents and RAG, it retrieves maintenance procedures and generates explainable, safety-focused reports, all without needing an internet connection.
                   </p>
                 </div>
 
                 {renderInputBox()}
 
                 <div className="flex flex-wrap gap-2 mt-4">
-                  {[
-                    "EGT limits for cruise",
-                    "Oil pressure normal range",
-                    "Vibration threshold alert",
-                    "Engine hours maintenance",
-                  ].map((s) => (
+                  {["EGT limits for cruise", "Oil pressure normal range", "Vibration threshold alert", "Engine hours maintenance"].map((s) => (
                     <button
                       key={s}
                       onClick={() => setInput(s)}
@@ -1078,7 +1103,6 @@ function ChatMain() {
               </div>
             </motion.div>
           ) : (
-            // ── Chat state: scrollable message list ──────────────────────────
             <motion.div
               key="messages"
               ref={scrollRef}
@@ -1095,18 +1119,15 @@ function ChatMain() {
                     transition={{ duration: 0.25, ease: "easeOut" }}
                     className={cn("flex", m.role === "user" ? "justify-end" : "justify-start")}
                   >
-                    {m.role === "user" ? (
-                      <div
-                        className="max-w-[75%] rounded-2xl rounded-tr-sm px-4 py-2.5 text-sm leading-relaxed"
-                        style={{ background: C.button, color: C.text }}
-                      >
-                        {m.content}
-                      </div>
+                      {m.role === "user" ? (
+      <div
+        className="max-w-[75%] rounded-2xl rounded-tr-sm px-4 py-2.5 text-sm leading-relaxed"
+        style={{ background:"#5397e6", color: "#FFFFFF" }}
+      >
+        {m.content}
+      </div>
                     ) : (
-                      <div
-                        className="max-w-fu rounded-2xl  px-4 py-3"
-                        style={{}}
-                      >
+                      <div className="max-w-full rounded-2xl px-4 py-3">
                         <div className="flex items-center gap-2 mb-2">
                           <Bot className="h-3.5 w-3.5" style={{ color: C.accent }} />
                           <span className="text-[10px] font-semibold uppercase tracking-widest" style={{ color: C.accent }}>
@@ -1115,26 +1136,19 @@ function ChatMain() {
                         </div>
 
                         {m.status === "loading" && (
-                          <div className="flex items-center gap-2">
-                            <span
-                              className="h-3.5 w-3.5 rounded-full animate-spin"
-                              style={{ border: `2px solid ${C.accent}30`, borderTopColor: C.accent }}
-                            />
-                            <span className="text-sm" style={{ color: C.sub }}>
+                          <div className="flex flex-col gap-2">
                             <Skeleton className="h-[40px] w-[600px] rounded-full" />
-                            <Skeleton className="h-[20px] w-[400px] mt-3 rounded-full" />
-                             <Skeleton className="h-[20px] w-[400px] mt-3 rounded-full" />
-                            </span>
+                            <Skeleton className="h-[20px] w-[400px] rounded-full" />
+                            <Skeleton className="h-[20px] w-[400px] rounded-full" />
                           </div>
                         )}
 
                         {m.status === "error" && (
-                          <p className="text-sm" style={{ color: C.critical }}>
-                            {m.content}
-                          </p>
+                          <p className="text-sm" style={{ color: C.critical }}>{m.content}</p>
                         )}
 
-                        {m.status === "done" && <MarkdownRenderer content={m.content} />}
+                        {m.status === "done" &&
+                          (m.report ? <ReportDisplay data={m.report} C={C} /> : <MarkdownRenderer content={m.content} />)}
                       </div>
                     )}
                   </motion.div>
@@ -1144,7 +1158,6 @@ function ChatMain() {
           )}
         </AnimatePresence>
 
-        {/* Docked input bar, shown once the conversation has started */}
         {isExpanded && (
           <motion.div
             initial={{ y: 40, opacity: 0 }}
@@ -1156,7 +1169,6 @@ function ChatMain() {
         )}
       </div>
 
-      {/* Sensor drawer */}
       <SensorDrawer open={drawerOpen} onClose={() => setDrawerOpen(false)} />
     </main>
   )
@@ -1178,4 +1190,4 @@ export default function Page() {
       </div>
     </ThemeContext.Provider>
   )
-}
+} 
