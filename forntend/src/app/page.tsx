@@ -1,6 +1,6 @@
 "use client"
 import { motion, AnimatePresence } from "framer-motion";
-import { useState, useEffect, useRef, createContext, useContext } from "react"
+import { useState, useEffect, useRef, createContext, useContext, useCallback } from "react"
 
 import {
   Plus,
@@ -27,7 +27,12 @@ import {
   Circle,
   User,
   Sun,
-  Moon
+  Moon,
+  Trash2,
+  Sparkles,
+  Layers,
+  ChevronRight,
+  BookOpen,
 } from "lucide-react"
 
 import {
@@ -46,15 +51,22 @@ import {
 import { Button } from "@/components/ui/button"
 import { cn } from "@/lib/utils"
 import { Skeleton } from "@/components/ui/skeleton";
-import ReportDisplay from "@/components/shared/ReportDisplay"
-import { askInstructorAgent,  getQaHistory, historyEntryToReport , type AskApiResponse } from "@/lib/instructorApi"
-
-
-
-
+import ReportDisplay, { MarkdownRenderer } from "@/components/shared/ReportDisplay"
+import DashboardView from "@/components/shared/DashboardView"
+import SettingsView from "@/components/shared/SettingsView"
+import ManualsDrawer from "@/components/shared/ManualsDrawer"
+import AgentPipelineTracker from "@/components/shared/AgentPipelineTracker"
+import {
+  askInstructorAgent,
+  getQaHistory,
+  getSessions,
+  deleteSession,
+  historyEntryToReport,
+  type AskApiResponse,
+  type SessionItem,
+} from "@/lib/instructorApi"
 
 // ─── Color tokens ─────────────────────────────────────────────────────────────
-// Dark mode keeps the original palette exactly as it was.
 const DARK: ColorTokens = {
   bg: "#0B1120",
   card: "#111827",
@@ -69,10 +81,6 @@ const DARK: ColorTokens = {
   cardBorder: "rgba(255,255,255,0.06)",
 }
 
-// Light mode: white background, and body text becomes the color that used
-// to be the dark-mode background (#0B1120). Everything else (accent, button,
-// status colors) is left the same so live-data coloring stays consistent;
-// card/sub/border are lightened just enough to stay readable on white.
 const LIGHT: ColorTokens = {
   bg: "#FFFFFF",
   card: "#F8FAFC",
@@ -106,10 +114,11 @@ type ChatMessage = {
   role: "user" | "assistant"
   content: string
   status?: "loading" | "done" | "error"
-  report?: AskApiResponse   // add this
+  report?: AskApiResponse
 }
 
 type ThemeMode = "light" | "dark"
+type ViewTab = "conversations" | "dashboard" | "settings"
 
 const ThemeContext = createContext<{ mode: ThemeMode; toggle: () => void; C: ColorTokens }>({
   mode: "dark",
@@ -119,6 +128,37 @@ const ThemeContext = createContext<{ mode: ThemeMode; toggle: () => void; C: Col
 
 function useTheme() {
   return useContext(ThemeContext)
+}
+
+// ─── Chat Session Context ──────────────────────────────────────────────────────
+type ChatContextType = {
+  activeTab: ViewTab
+  setActiveTab: (tab: ViewTab) => void
+  sessions: SessionItem[]
+  activeSessionId: string
+  isDraftSession: boolean
+  messages: ChatMessage[]
+  loading: boolean
+  isExpanded: boolean
+  agentsOn: boolean
+  setAgentsOn: React.Dispatch<React.SetStateAction<boolean>>
+  input: string
+  setInput: React.Dispatch<React.SetStateAction<string>>
+  handleAsk: (overrideQuestion?: string) => Promise<void>
+  handleNewSession: () => void
+  handleSelectSession: (sessionId: string) => Promise<void>
+  handleDeleteSession: (e: React.MouseEvent, sessionId: string) => Promise<void>
+  refreshSessions: () => Promise<void>
+  openManuals: boolean
+  setOpenManuals: (open: boolean) => void
+}
+
+const ChatContext = createContext<ChatContextType | null>(null)
+
+function useChat() {
+  const ctx = useContext(ChatContext)
+  if (!ctx) throw new Error("useChat must be used within ChatProvider")
+  return ctx
 }
 
 // ─── Sensor simulation ────────────────────────────────────────────────────────
@@ -135,7 +175,6 @@ type SensorData = {
   engine_hours: number
 }
 
-// Two wing-mounted engines, each with its own live feed.
 const BASE_ENGINES: Record<string, SensorData> = {
   "ENG-1": {
     engine_id: "ENG-1",
@@ -184,7 +223,6 @@ function nextSensor(prev: SensorData): SensorData {
   }
 }
 
-// ─── Status helpers ───────────────────────────────────────────────────────────
 function egtStatus(v: number) {
   if (v > 900) return "critical"
   if (v > 820) return "warning"
@@ -272,146 +310,7 @@ function SensorRow({
   )
 }
 
-// ─── Minimal Markdown renderer (headers, bold/italic/code, lists, code blocks) ─
-function renderInline(text: string, C: ColorTokens): React.ReactNode[] {
-  const parts: React.ReactNode[] = []
-  const pattern = /(`[^`]+`|\*\*[^*]+\*\*|\*[^*]+\*)/g
-  let lastIndex = 0
-  let match: RegExpExecArray | null
-  let key = 0
-  while ((match = pattern.exec(text)) !== null) {
-    if (match.index > lastIndex) parts.push(text.slice(lastIndex, match.index))
-    const token = match[0]
-    if (token.startsWith("`")) {
-      parts.push(
-        <code
-          key={key++}
-          className="px-1 py-0.5 rounded text-[12px] font-mono"
-          style={{ background: "rgba(6,182,212,0.12)", color: C.accent }}
-        >
-          {token.slice(1, -1)}
-        </code>
-      )
-    } else if (token.startsWith("**")) {
-      parts.push(
-        <strong key={key++} style={{ color: C.text }}>
-          {token.slice(2, -2)}
-        </strong>
-      )
-    } else {
-      parts.push(<em key={key++}>{token.slice(1, -1)}</em>)
-    }
-    lastIndex = match.index + token.length
-  }
-  if (lastIndex < text.length) parts.push(text.slice(lastIndex))
-  return parts
-}
-
-function MarkdownRenderer({ content }: { content: string }) {
-  const { C } = useTheme()
-  const lines = content.split("\n")
-  const elements: React.ReactNode[] = []
-  let listBuffer: string[] = []
-  let listType: "ul" | "ol" | null = null
-  let codeBuffer: string[] = []
-  let inCode = false
-
-  const flushList = () => {
-    if (listBuffer.length === 0) return
-    const items = listBuffer
-    if (listType === "ol") {
-      elements.push(
-        <ol key={`list-${elements.length}`} className="list-decimal ml-5 mb-2">
-          {items.map((item, i) => (
-            <li key={i} className="text-sm leading-relaxed mb-0.5" style={{ color: C.sub }}>
-              {renderInline(item, C)}
-            </li>
-          ))}
-        </ol>
-      )
-    } else {
-      elements.push(
-        <ul key={`list-${elements.length}`} className="list-disc ml-5 mb-2">
-          {items.map((item, i) => (
-            <li key={i} className="text-sm leading-relaxed mb-0.5" style={{ color: C.sub }}>
-              {renderInline(item, C)}
-            </li>
-          ))}
-        </ul>
-      )
-    }
-    listBuffer = []
-    listType = null
-  }
-
-  lines.forEach((line, idx) => {
-    if (line.trim().startsWith("```")) {
-      if (inCode) {
-        elements.push(
-          <pre
-            key={`code-${idx}`}
-            className="rounded-lg p-3 mb-2 overflow-x-auto text-[12px] font-mono"
-            style={{ background: "#0d1526", border: `1px solid ${C.cardBorder}`, color: C.accent }}
-          >
-            {codeBuffer.join("\n")}
-          </pre>
-        )
-        codeBuffer = []
-        inCode = false
-      } else {
-        flushList()
-        inCode = true
-      }
-      return
-    }
-    if (inCode) {
-      codeBuffer.push(line)
-      return
-    }
-    const headerMatch = line.match(/^(#{1,3})\s+(.*)/)
-    if (headerMatch) {
-      flushList()
-      const level = headerMatch[1].length
-      const sizeClass =
-        level === 1
-          ? "text-lg font-bold mb-2 mt-1"
-          : level === 2
-          ? "text-base font-bold mb-1.5 mt-1"
-          : "text-sm font-semibold mb-1 mt-1"
-      elements.push(
-        <p key={`h-${idx}`} className={sizeClass} style={{ color: C.text }}>
-          {renderInline(headerMatch[2], C)}
-        </p>
-      )
-      return
-    }
-    const bulletMatch = line.match(/^\s*[-*]\s+(.*)/)
-    if (bulletMatch) {
-      if (listType !== "ul") flushList()
-      listType = "ul"
-      listBuffer.push(bulletMatch[1])
-      return
-    }
-    const numberedMatch = line.match(/^\s*\d+\.\s+(.*)/)
-    if (numberedMatch) {
-      if (listType !== "ol") flushList()
-      listType = "ol"
-      listBuffer.push(numberedMatch[1])
-      return
-    }
-    flushList()
-    if (line.trim() === "") return
-    elements.push(
-      <p key={`p-${idx}`} className="text-sm leading-relaxed mb-2" style={{ color: C.sub }}>
-        {renderInline(line, C)}
-      </p>
-    )
-  })
-  flushList()
-  return <>{elements}</>
-}
-
-// ─── Engine hotspot overlay on the top‑down aircraft diagram ──────────────────
+// ─── Engine hotspot overlay ───────────────────────────────────────────────────
 const ENGINE_POSITIONS: Record<string, { top: string; left: string; label: string }> = {
   "ENG-1": { top: "70%", left: "40%", label: "Left engine (ENG-1)" },
   "ENG-2": { top: "70%", left: "60%", label: "Right engine (ENG-2)" },
@@ -643,18 +542,20 @@ function SensorDrawer({ open, onClose }: { open: boolean; onClose: () => void })
   )
 }
 
-// ─── Recent Chats ─────────────────────────────────────────────────────────────
-const recentChats = [
-  { label: "Engine start procedure ENG-3" },
-  { label: "Pre‑flight checklist" },
-  { label: "Turbine blade inspection" },
-  { label: "Fuel system anomaly" },
-]
-
-// ─── Sidebar ──────────────────────────────────────────────────────────────────
+// ─── Sidebar Component ────────────────────────────────────────────────────────
 function AppSidebar() {
   const { state } = useSidebar()
   const { C } = useTheme()
+  const {
+    activeTab,
+    setActiveTab,
+    sessions,
+    activeSessionId,
+    handleNewSession,
+    handleSelectSession,
+    handleDeleteSession,
+    setOpenManuals,
+  } = useChat()
   const collapsed = state === "collapsed"
 
   return (
@@ -662,7 +563,7 @@ function AppSidebar() {
       className="border-r-0"
       style={
         {
-          "--sidebar-width": "240px",
+          "--sidebar-width": "260px",
           "--sidebar": C.card,
           "--sidebar-foreground": C.text,
           "--sidebar-accent": "rgba(6,182,212,0.08)",
@@ -692,21 +593,45 @@ function AppSidebar() {
             </div>
           )}
         </div>
-        <SidebarMenu>
-          <SidebarMenuItem>
-            <SidebarMenuButton
-              className="flex items-center gap-2.5 px-3 py-2 rounded-lg font-medium text-xs transition-all"
-              style={{
-                background: `${C.button}22`,
-                color: C.text,
-                border: `1px solid ${C.button}40`,
-              }}
-            >
-              <Plus className="h-3.5 w-3.5 shrink-0" style={{ color: C.accent }} />
-              {!collapsed && <span>New Session</span>}
-            </SidebarMenuButton>
-          </SidebarMenuItem>
-        </SidebarMenu>
+
+        {/* Action Buttons in Header */}
+        <div className="flex flex-col gap-1.5">
+          <SidebarMenu>
+            <SidebarMenuItem>
+              <SidebarMenuButton
+                onClick={handleNewSession}
+                className="flex items-center gap-2.5 px-3 py-2 rounded-lg font-medium text-xs transition-all hover:scale-[1.02] active:scale-[0.98]"
+                style={{
+                  background: `${C.button}22`,
+                  color: C.text,
+                  border: `1px solid ${C.button}40`,
+                }}
+                title="Start a new conversation session"
+              >
+                <Plus className="h-3.5 w-3.5 shrink-0" style={{ color: C.accent }} />
+                {!collapsed && <span>New Session</span>}
+              </SidebarMenuButton>
+            </SidebarMenuItem>
+          </SidebarMenu>
+
+          <SidebarMenu>
+            <SidebarMenuItem>
+              <SidebarMenuButton
+                onClick={() => setOpenManuals(true)}
+                className="flex items-center gap-2.5 px-3 py-1.5 rounded-lg text-xs font-medium transition-all hover:bg-cyan-500/10"
+                style={{
+                  background: "rgba(6,182,212,0.08)",
+                  color: C.accent,
+                  border: `1px solid rgba(6,182,212,0.2)`,
+                }}
+                title="Manage aircraft manuals & ChromaDB ingestion"
+              >
+                <BookOpen className="h-3.5 w-3.5 shrink-0" />
+                {!collapsed && <span>+ Add / Ingest Manual</span>}
+              </SidebarMenuButton>
+            </SidebarMenuItem>
+          </SidebarMenu>
+        </div>
       </SidebarHeader>
 
       <SidebarContent className="px-2 py-2 overflow-y-auto">
@@ -718,14 +643,33 @@ function AppSidebar() {
           </div>
           <SidebarMenu className="gap-0.5">
             {[
-              { label: "Conversations", icon: MessageSquare, active: true },
-              { label: "Dashboard", icon: LayoutDashboard, active: false },
-              { label: "Settings", icon: Settings, active: false },
+              {
+                id: "conversations",
+                label: "Conversations",
+                icon: MessageSquare,
+                onClick: () => setActiveTab("conversations"),
+                active: activeTab === "conversations",
+              },
+              {
+                id: "dashboard",
+                label: "Dashboard",
+                icon: LayoutDashboard,
+                onClick: () => setActiveTab("dashboard"),
+                active: activeTab === "dashboard",
+              },
+              {
+                id: "settings",
+                label: "Settings",
+                icon: Settings,
+                onClick: () => setActiveTab("settings"),
+                active: activeTab === "settings",
+              },
             ].map((item) => (
               <SidebarMenuItem key={item.label}>
                 <SidebarMenuButton
                   isActive={item.active}
-                  className="flex items-center gap-2.5 px-3 py-2 rounded-lg text-xs transition-all"
+                  onClick={item.onClick}
+                  className="flex items-center gap-2.5 px-3 py-2 rounded-lg text-xs transition-all cursor-pointer"
                   style={
                     item.active
                       ? { background: `${C.accent}15`, color: C.accent, border: `1px solid ${C.accent}25` }
@@ -744,18 +688,62 @@ function AppSidebar() {
           <SidebarGroup className="py-1 mt-2">
             <div className="px-3 pb-1.5 flex items-center justify-between">
               <p className="text-[10px] font-semibold uppercase tracking-widest" style={{ color: `${C.sub}80` }}>
-                Recent Sessions
+                Recent Sessions {sessions.length > 0 && `(${sessions.length})`}
               </p>
             </div>
-            <SidebarMenu className="gap-0.5">
-              {recentChats.map((chat) => (
-                <SidebarMenuItem key={chat.label}>
-                  <SidebarMenuButton className="flex items-center gap-2 px-3 py-2 rounded-lg text-xs" style={{ color: C.sub }}>
-                    <Circle className="h-1.5 w-1.5 shrink-0 fill-current" style={{ color: `${C.sub}60` }} />
-                    <span className="truncate">{chat.label}</span>
-                  </SidebarMenuButton>
-                </SidebarMenuItem>
-              ))}
+            <SidebarMenu className="gap-1">
+              {sessions.length === 0 ? (
+                <div className="px-3 py-3 text-[11px] text-center italic" style={{ color: `${C.sub}70` }}>
+                  No saved sessions yet. Send a message to start!
+                </div>
+              ) : (
+                sessions.map((session) => {
+                  const isActive = session.session_id === activeSessionId && activeTab === "conversations"
+                  return (
+                    <SidebarMenuItem key={session.session_id}>
+                      <div
+                        onClick={() => handleSelectSession(session.session_id)}
+                        className="group flex items-center justify-between w-full px-2.5 py-2 rounded-lg text-xs cursor-pointer transition-all relative overflow-hidden"
+                        style={
+                          isActive
+                            ? {
+                                background: `${C.accent}18`,
+                                color: C.text,
+                                border: `1px solid ${C.accent}40`,
+                              }
+                            : {
+                                color: C.sub,
+                                border: "1px solid transparent",
+                              }
+                        }
+                      >
+                        <div className="flex items-center gap-2 min-w-0 pr-1 flex-1">
+                          <Circle
+                            className="h-1.5 w-1.5 shrink-0 fill-current"
+                            style={{ color: isActive ? C.accent : `${C.sub}60` }}
+                          />
+                          <div className="flex flex-col min-w-0 flex-1">
+                            <span className="truncate font-medium" style={{ color: isActive ? C.text : C.sub }}>
+                              {session.title || "Aircraft Inquiry"}
+                            </span>
+                            <span className="text-[9px] truncate" style={{ color: `${C.sub}80` }}>
+                              {session.mode === "multi_agent" ? "🤖 Multi-Agent" : "📄 Simple RAG"} • {session.turn_count} turns
+                            </span>
+                          </div>
+                        </div>
+
+                        <button
+                          onClick={(e) => handleDeleteSession(e, session.session_id)}
+                          className="p-1 rounded opacity-0 group-hover:opacity-100 hover:bg-red-500/20 hover:text-red-400 transition-all shrink-0"
+                          title="Delete session"
+                        >
+                          <Trash2 className="h-3 w-3" />
+                        </button>
+                      </div>
+                    </SidebarMenuItem>
+                  )
+                })
+              )}
             </SidebarMenu>
           </SidebarGroup>
         )}
@@ -780,28 +768,25 @@ function AppSidebar() {
                   style={{ background: C.success, boxShadow: `0 0 4px ${C.success}` }}
                 />
                 <span className="text-[10px]" style={{ color: C.sub }}>
-                  Online • getnitro-rag
+                  Online • FastAPI Backend
                 </span>
               </div>
             </div>
           )}
           {!collapsed && (
-            <button className="ml-auto p-1 rounded" style={{ color: C.sub }}>
-              <ChevronUp className="h-3.5 w-3.5" />
+            <button
+              onClick={() => setActiveTab("settings")}
+              className="ml-auto p-1 rounded hover:bg-white/5 transition-colors"
+              style={{ color: C.sub }}
+              title="Open Settings"
+            >
+              <Settings className="h-3.5 w-3.5" />
             </button>
           )}
         </div>
       </SidebarFooter>
     </Sidebar>
   )
-}
-
-// ─── Chat message types ────────────────────────────────────────────────────────
-type ChatMessage = {
-  id: string
-  role: "user" | "assistant"
-  content: string
-  status?: "loading" | "done" | "error"
 }
 
 // ─── Theme toggle button ───────────────────────────────────────────────────────
@@ -828,113 +813,33 @@ function ThemeToggle() {
 // ─── Main chat area ────────────────────────────────────────────────────────────
 function ChatMain() {
   const { C } = useTheme()
-  const [input, setInput] = useState("")
-  const [agentsOn, setAgentsOn] = useState(false)
+  const {
+    activeTab,
+    setActiveTab,
+    sessions,
+    activeSessionId,
+    isDraftSession,
+    messages,
+    loading,
+    isExpanded,
+    agentsOn,
+    setAgentsOn,
+    input,
+    setInput,
+    handleAsk,
+    handleNewSession,
+    handleSelectSession,
+    setOpenManuals,
+  } = useChat()
+
   const [drawerOpen, setDrawerOpen] = useState(false)
-  const [messages, setMessages] = useState<ChatMessage[]>([])
-  const [loading, setLoading] = useState(false)
-  const [isExpanded, setIsExpanded] = useState(false)
-  const [historyLoaded, setHistoryLoaded] = useState(false)
   const scrollRef = useRef<HTMLDivElement>(null)
-  const sessionIdRef = useRef(`session-${Date.now()}`)
-
-  // ─── Load past conversation for this session, if it exists ─────────────────
-  useEffect(() => {
-    let cancelled = false
-
-    async function loadHistory() {
-      try {
-        const data = await getQaHistory(sessionIdRef.current)
-        if (cancelled || !data.qa_pairs?.length) return
-
-        const rehydrated: ChatMessage[] = data.qa_pairs.flatMap((entry) => {
-          const userMsg: ChatMessage = {
-            id: `hist-u-${entry.id}`,
-            role: "user",
-            content: entry.query,
-          }
-          const assistantMsg: ChatMessage = {
-            id: `hist-a-${entry.id}`,
-            role: "assistant",
-            content: entry.answer.summary,
-            status: "done",
-            report: historyEntryToReport(entry),
-          }
-          return [userMsg, assistantMsg]
-        })
-
-        setMessages(rehydrated)
-        setIsExpanded(true)
-      } catch {
-        // No history for this session yet — that's fine, start fresh.
-      } finally {
-        if (!cancelled) setHistoryLoaded(true)
-      }
-    }
-
-    loadHistory()
-    return () => {
-      cancelled = true
-    }
-  }, [])
 
   useEffect(() => {
     if (scrollRef.current) {
       scrollRef.current.scrollTop = scrollRef.current.scrollHeight
     }
   }, [messages, loading])
-
-  const handleAsk = async () => {
-    const question = input.trim()
-    if (!question) return
-
-    const userMsgId = `u-${Date.now()}`
-    const assistantMsgId = `a-${Date.now()}`
-
-    setMessages((prev) => [
-      ...prev,
-      { id: userMsgId, role: "user", content: question },
-      { id: assistantMsgId, role: "assistant", content: "", status: "loading" },
-    ])
-
-    setInput("")
-    setIsExpanded(true)
-    setLoading(true)
-
-    try {
-      const data = await askInstructorAgent({
-        query: question,
-        session_id: sessionIdRef.current,
-        use_agents: agentsOn,
-        ...(agentsOn && {
-          sensor_data: {
-            engine_temp: "normal, 480°C",
-            oil_pressure: "58 psi",
-            vibration: "1.2 IPS",
-            fault_codes: "none reported",
-            maintenance_history: "last inspected 40 flight hours ago",
-            operating_hours: "6200",
-            flight_cycles: "2100",
-          },
-          aircraft_info: { aircraft_model: "Boeing 737-800", engine_model: "CFM56-7B" },
-        }),
-      })
-
-      setMessages((prev) =>
-        prev.map((m) => (m.id === assistantMsgId ? { ...m, report: data, status: "done" } : m))
-      )
-    } catch (err) {
-      setMessages((prev) =>
-        prev.map((m) =>
-          m.id === assistantMsgId
-            ? { ...m, content: "Couldn't reach the instructor agent.", status: "error" }
-            : m
-        )
-      )
-    } finally {
-      setLoading(false)
-    }
-  }
 
   const handleKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
     if (e.key === "Enter" && !e.shiftKey) {
@@ -943,11 +848,23 @@ function ChatMain() {
     }
   }
 
-  // ─── Reusable input box (used both centered and docked at bottom) ───────────
+  // Active session title for breadcrumb
+  const currentSession = sessions.find((s) => s.session_id === activeSessionId)
+  const sessionTitle = isDraftSession
+    ? "New Session"
+    : currentSession?.title
+    ? currentSession.title.slice(0, 28) + (currentSession.title.length > 28 ? "..." : "")
+    : "Active Session"
+
+  // ─── Reusable input box ─────────────────────────────────────────────────────
   const renderInputBox = () => (
     <div
       className="relative rounded-2xl"
-      style={{ background: C.card, border: `1px solid ${C.border}`, boxShadow: `0 0 0 1px rgba(6,182,212,0.06), 0 16px 48px rgba(0,0,0,0.5)` }}
+      style={{
+        background: C.card,
+        border: `1px solid ${C.border}`,
+        boxShadow: `0 0 0 1px rgba(6,182,212,0.06), 0 16px 48px rgba(0,0,0,0.5)`,
+      }}
     >
       <div className="relative px-4 pt-4 pb-2">
         <textarea
@@ -956,28 +873,26 @@ function ChatMain() {
           onChange={(e) => setInput(e.target.value)}
           onKeyDown={handleKeyDown}
           rows={2}
-          placeholder="Ask about engine parameters..."
+          placeholder={
+            agentsOn
+              ? "Ask multi-agent instructor (e.g., Engine vibration & low oil pressure)..."
+              : "Ask about maintenance manuals (e.g., CFM56 oil filter replacement)..."
+          }
           className="w-full bg-transparent resize-none outline-none text-sm leading-relaxed min-h-[52px] max-h-48"
           style={{ color: C.text, caretColor: C.accent }}
           autoFocus
         />
-        <div className="absolute top-4 right-4 h-2 w-2 rounded-full" style={{ background: C.success, boxShadow: `0 0 8px ${C.success}` }} />
+        <div
+          className="absolute top-4 right-4 h-2 w-2 rounded-full"
+          style={{ background: C.success, boxShadow: `0 0 8px ${C.success}` }}
+        />
       </div>
 
-      <div className="flex items-center justify-between px-3 pb-3 pt-1" style={{ borderTop: `1px solid rgba(255,255,255,0.04)` }}>
-        <button id="attach-btn" className="h-8 w-8 flex items-center justify-center rounded-lg" style={{ color: C.sub }} title="Attach">
-          <Plus className="h-4 w-4" />
-        </button>
-
+      <div
+        className="flex items-center justify-between px-3 pb-3 pt-1"
+        style={{ borderTop: `1px solid rgba(255,255,255,0.04)` }}
+      >
         <div className="flex items-center gap-1.5">
-          <div
-            className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg text-[11px] font-mono font-semibold"
-            style={{ background: `${C.accent}12`, color: C.accent, border: `1px solid ${C.accent}25` }}
-          >
-            <Cpu className="h-3 w-3" />
-            getnitro-rag
-          </div>
-
           <button
             id="agents-toggle"
             onClick={() => setAgentsOn((v) => !v)}
@@ -987,207 +902,469 @@ function ChatMain() {
               color: agentsOn ? C.text : C.sub,
               border: `1px solid ${agentsOn ? C.button + "50" : "rgba(255,255,255,0.08)"}`,
             }}
-            title="Toggle agents"
+            title="Toggle 5-Agent Diagnostic Pipeline"
           >
             <Bot className="h-3.5 w-3.5" />
-            Agents
+            5-Agents
             <span
               className="inline-flex items-center ml-1 h-4 w-7 rounded-full relative transition-all"
               style={{ background: agentsOn ? C.button : "rgba(255,255,255,0.12)" }}
             >
               <span
                 className="absolute h-3 w-3 rounded-full bg-white transition-all"
-                style={{ left: agentsOn ? "calc(100% - 14px)" : "2px", boxShadow: "0 1px 3px rgba(0,0,0,0.3)" }}
+                style={{
+                  left: agentsOn ? "calc(100% - 14px)" : "2px",
+                  boxShadow: "0 1px 3px rgba(0,0,0,0.3)",
+                }}
               />
             </span>
           </button>
 
           <button
             onClick={() => setDrawerOpen(true)}
-            className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg"
+            className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg text-[11px] font-semibold"
             style={{ background: "rgba(255,255,255,0.05)", color: C.sub }}
-            title="Show telemetry"
+            title="Show live telemetry simulation"
           >
             <Cpu className="h-3.5 w-3.5" />
-          </button>
-
-          <button
-            id="send-btn"
-            onClick={handleAsk}
-            disabled={loading || !input.trim()}
-            className="h-8 w-8 flex items-center justify-center rounded-lg transition-all disabled:cursor-not-allowed"
-            style={{
-              background: input.trim() ? C.button : `${C.button}80`,
-              color: C.text,
-              boxShadow: input.trim() ? `0 0 16px ${C.button}60` : "none",
-            }}
-            title="Send"
-          >
-            {loading ? (
-              <span
-                className="h-3.5 w-3.5 rounded-full animate-spin"
-                style={{ border: `2px solid ${C.text}40`, borderTopColor: C.text }}
-              />
-            ) : (
-              <ArrowUp className="h-4 w-4" />
-            )}
+            Telemetry
           </button>
         </div>
+
+        <button
+          id="send-btn"
+          onClick={() => handleAsk()}
+          disabled={loading || !input.trim()}
+          className="h-8 w-8 flex items-center justify-center rounded-lg transition-all disabled:cursor-not-allowed"
+          style={{
+            background: input.trim() ? C.button : `${C.button}80`,
+            color: C.text,
+            boxShadow: input.trim() ? `0 0 16px ${C.button}60` : "none",
+          }}
+          title="Send query"
+        >
+          {loading ? (
+            <span
+              className="h-3.5 w-3.5 rounded-full animate-spin"
+              style={{ border: `2px solid ${C.text}40`, borderTopColor: C.text }}
+            />
+          ) : (
+            <ArrowUp className="h-4 w-4" />
+          )}
+        </button>
       </div>
     </div>
   )
 
   return (
     <main className="flex-1 flex flex-col relative overflow-hidden" style={{ background: C.bg }}>
-      <div className="absolute inset-0 pointer-events-none" style={{ background: `radial-gradient(ellipse 60% 40% at 50% 30%, ${C.accent}08 0%, transparent 70%)` }} />
+      <div
+        className="absolute inset-0 pointer-events-none"
+        style={{
+          background: `radial-gradient(ellipse 60% 40% at 50% 30%, ${C.accent}08 0%, transparent 70%)`,
+        }}
+      />
 
-      <div className="relative z-10 flex items-center px-5 py-3" style={{ borderBottom: `1px solid rgba(255,255,255,0.04)` }}>
+      {/* Header bar */}
+      <div
+        className="relative z-10 flex items-center px-5 py-3"
+        style={{ borderBottom: `1px solid rgba(255,255,255,0.04)` }}
+      >
         <SidebarTrigger className="h-7 w-7 rounded-lg" style={{ color: C.sub }} />
         <div className="flex items-center gap-2 ml-3">
           <Plane className="h-3.5 w-3.5" style={{ color: C.accent }} />
-          <span className="text-xs font-semibold" style={{ color: C.sub }}>AeroIntel AI</span>
+          <span className="text-xs font-semibold" style={{ color: C.sub }}>
+            AeroIntel AI
+          </span>
           <span style={{ color: `${C.sub}40` }}>/</span>
-          <span className="text-xs font-semibold" style={{ color: C.text }}>Active Session</span>
+          <span className="text-xs font-semibold capitalize" style={{ color: C.text }}>
+            {activeTab === "dashboard"
+              ? "Fleet Dashboard"
+              : activeTab === "settings"
+              ? "System Settings"
+              : sessionTitle}
+          </span>
         </div>
-        <div className="ml-auto">
+        <div className="ml-auto flex items-center gap-2">
           <ThemeToggle />
         </div>
       </div>
 
-      <div className="relative z-10 flex-1 flex flex-col overflow-hidden">
-        <AnimatePresence mode="wait">
-          {!isExpanded ? (
-            <motion.div
-              key="hero"
-              initial={{ opacity: 1 }}
-              exit={{ opacity: 0, y: -16, transition: { duration: 0.35, ease: "easeInOut" } }}
-              className="flex-1 flex flex-col items-center justify-center px-6 pb-10"
-            >
-              <div className="w-full max-w-2xl">
-                <div className="mb-10">
-                  <div className="flex items-center gap-3 mb-3">
-                    <div
-                      className="h-10 w-10 rounded-xl flex items-center justify-center"
-                      style={{ background: `${C.accent}18`, border: `1px solid ${C.accent}30`, boxShadow: `0 0 20px ${C.accent}20` }}
-                    >
-                      <Plane className="h-5 w-5" style={{ color: C.accent }} />
+      {/* View Switcher: Dashboard vs Settings vs Conversations */}
+      {activeTab === "dashboard" ? (
+        <DashboardView
+          sessions={sessions}
+          onSelectSession={(sid) => {
+            setActiveTab("conversations")
+            handleSelectSession(sid)
+          }}
+          onNewSession={() => {
+            setActiveTab("conversations")
+            handleNewSession()
+          }}
+          onOpenManuals={() => setOpenManuals(true)}
+          C={C}
+        />
+      ) : activeTab === "settings" ? (
+        <SettingsView C={C} />
+      ) : (
+        <div className="relative z-10 flex-1 flex flex-col overflow-hidden">
+          <AnimatePresence mode="wait">
+            {!isExpanded || messages.length === 0 ? (
+              <motion.div
+                key="hero"
+                initial={{ opacity: 1 }}
+                exit={{ opacity: 0, y: -16, transition: { duration: 0.35, ease: "easeInOut" } }}
+                className="flex-1 flex flex-col items-center justify-center px-6 pb-10 overflow-y-auto"
+              >
+                <div className="w-full max-w-2xl">
+                  <div className="mb-8">
+                    <div className="flex items-center gap-3 mb-3">
+                      <div
+                        className="h-10 w-10 rounded-xl flex items-center justify-center"
+                        style={{
+                          background: `${C.accent}18`,
+                          border: `1px solid ${C.accent}30`,
+                          boxShadow: `0 0 20px ${C.accent}20`,
+                        }}
+                      >
+                        <Plane className="h-5 w-5" style={{ color: C.accent }} />
+                      </div>
+                      <div>
+                        <p className="text-[11px] font-semibold uppercase tracking-widest" style={{ color: C.accent }}>
+                          Aircraft Maintenance & Digital Twin AI
+                        </p>
+                      </div>
                     </div>
-                    <div>
-                      <p className="text-[11px] font-semibold uppercase tracking-widest" style={{ color: C.accent }}>
-                        Aircraft Instructor Agent
-                      </p>
-                    </div>
+                    <h1 className="text-3xl font-bold leading-tight tracking-tight mb-2" style={{ color: C.text }}>
+                      How can I assist with aircraft maintenance today?
+                    </h1>
+                    <p className="text-sm leading-relaxed" style={{ color: C.sub }}>
+                      Diagnose engine anomalies, analyze sensor telemetry trends, verify FAA/OEM safety compliance, and predict component remaining useful life using intelligent RAG and multi-agent systems.
+                    </p>
                   </div>
-                  <h1 className="text-4xl font-bold leading-tight tracking-tight mb-2" style={{ color: C.text }}>
-                    Welcome to AeroIntel AI
-                  </h1>
-                  <p className="text-sm leading-relaxed" style={{ color: C.sub }}>
-                    AeroIntel AI is an offline, multi-agent maintenance assistant for aircraft engineers — it diagnoses engine faults, analyzes live sensor telemetry, and predicts component failures. Powered by AI agents and RAG, it retrieves maintenance procedures and generates explainable, safety-focused reports, all without needing an internet connection.
-                  </p>
+
+                  {renderInputBox()}
+
+                  <div className="flex flex-wrap gap-2 mt-4">
+                    {[
+                      "CFM56 engine vibration high with low oil pressure",
+                      "How to replace CFM56 oil filter?",
+                      "What are the EGT limits during takeoff?",
+                      "Borescope inspection procedure for compressor blades",
+                    ].map((s) => (
+                      <button
+                        key={s}
+                        onClick={() => handleAsk(s)}
+                        className="text-xs px-3 py-1.5 rounded-full transition-all hover:border-cyan-400/40"
+                        style={{
+                          background: "rgba(6,182,212,0.08)",
+                          color: C.sub,
+                          border: `1px solid rgba(6,182,212,0.15)`,
+                        }}
+                      >
+                        {s}
+                      </button>
+                    ))}
+                  </div>
                 </div>
-
-                {renderInputBox()}
-
-                <div className="flex flex-wrap gap-2 mt-4">
-                  {["EGT limits for cruise", "Oil pressure normal range", "Vibration threshold alert", "Engine hours maintenance"].map((s) => (
-                    <button
-                      key={s}
-                      onClick={() => setInput(s)}
-                      className="text-xs px-3 py-1.5 rounded-full transition-all"
-                      style={{ background: "rgba(6,182,212,0.08)", color: C.sub, border: `1px solid rgba(6,182,212,0.15)` }}
+              </motion.div>
+            ) : (
+              <motion.div
+                key="messages"
+                ref={scrollRef}
+                initial={{ opacity: 0 }}
+                animate={{ opacity: 1, transition: { duration: 0.35, delay: 0.1 } }}
+                className="flex-1 overflow-y-auto px-6 py-6"
+              >
+                <div className="w-full max-w-2xl mx-auto flex flex-col gap-5">
+                  {messages.map((m) => (
+                    <motion.div
+                      key={m.id}
+                      initial={{ opacity: 0, y: 12 }}
+                      animate={{ opacity: 1, y: 0 }}
+                      transition={{ duration: 0.25, ease: "easeOut" }}
+                      className={cn("flex", m.role === "user" ? "justify-end" : "justify-start")}
                     >
-                      {s}
-                    </button>
+                      {m.role === "user" ? (
+                        <div
+                          className="max-w-[75%] rounded-2xl rounded-tr-sm px-4 py-2.5 text-sm leading-relaxed shadow-sm"
+                          style={{ background: C.button, color: "#FFFFFF" }}
+                        >
+                          {m.content}
+                        </div>
+                      ) : (
+                        <div className="max-w-full w-full rounded-2xl px-4 py-3">
+                          <div className="flex items-center gap-2 mb-2">
+                            <Bot className="h-3.5 w-3.5" style={{ color: C.accent }} />
+                            <span
+                              className="text-[10px] font-semibold uppercase tracking-widest"
+                              style={{ color: C.accent }}
+                            >
+                              Instructor Agent
+                            </span>
+                          </div>
+
+                          {m.status === "loading" && (
+                            agentsOn ? (
+                              <AgentPipelineTracker C={C} />
+                            ) : (
+                              <div className="flex flex-col gap-2.5 py-2">
+                                <div className="flex items-center gap-2 text-xs font-mono text-cyan-400">
+                                  <span className="h-2 w-2 rounded-full bg-cyan-400 animate-ping" />
+                                  Routing query to manual & retrieving vector embeddings...
+                                </div>
+                                <Skeleton className="h-[36px] w-[90%] rounded-lg" />
+                                <Skeleton className="h-[20px] w-[70%] rounded-lg" />
+                                <Skeleton className="h-[20px] w-[50%] rounded-lg" />
+                              </div>
+                            )
+                          )}
+
+                          {m.status === "error" && (
+                            <p className="text-sm" style={{ color: C.critical }}>
+                              {m.content}
+                            </p>
+                          )}
+
+                          {m.status === "done" &&
+                            (m.report ? (
+                              <ReportDisplay data={m.report} C={C} />
+                            ) : (
+                              <MarkdownRenderer content={m.content} C={C} />
+                            ))}
+                        </div>
+                      )}
+                    </motion.div>
                   ))}
                 </div>
-              </div>
-            </motion.div>
-          ) : (
+              </motion.div>
+            )}
+          </AnimatePresence>
+
+          {isExpanded && messages.length > 0 && (
             <motion.div
-              key="messages"
-              ref={scrollRef}
-              initial={{ opacity: 0 }}
-              animate={{ opacity: 1, transition: { duration: 0.35, delay: 0.1 } }}
-              className="flex-1 overflow-y-auto px-6 py-6"
+              initial={{ y: 40, opacity: 0 }}
+              animate={{ y: 0, opacity: 1, transition: { duration: 0.35, ease: "easeOut" } }}
+              className="px-6 pb-6 pt-2"
             >
-              <div className="w-full max-w-2xl mx-auto flex flex-col gap-4">
-                {messages.map((m) => (
-                  <motion.div
-                    key={m.id}
-                    initial={{ opacity: 0, y: 12 }}
-                    animate={{ opacity: 1, y: 0 }}
-                    transition={{ duration: 0.25, ease: "easeOut" }}
-                    className={cn("flex", m.role === "user" ? "justify-end" : "justify-start")}
-                  >
-                      {m.role === "user" ? (
-      <div
-        className="max-w-[75%] rounded-2xl rounded-tr-sm px-4 py-2.5 text-sm leading-relaxed"
-        style={{ background:"#5397e6", color: "#FFFFFF" }}
-      >
-        {m.content}
-      </div>
-                    ) : (
-                      <div className="max-w-full rounded-2xl px-4 py-3">
-                        <div className="flex items-center gap-2 mb-2">
-                          <Bot className="h-3.5 w-3.5" style={{ color: C.accent }} />
-                          <span className="text-[10px] font-semibold uppercase tracking-widest" style={{ color: C.accent }}>
-                            Instructor Agent
-                          </span>
-                        </div>
-
-                        {m.status === "loading" && (
-                          <div className="flex flex-col gap-2">
-                            <Skeleton className="h-[40px] w-[600px] rounded-full" />
-                            <Skeleton className="h-[20px] w-[400px] rounded-full" />
-                            <Skeleton className="h-[20px] w-[400px] rounded-full" />
-                          </div>
-                        )}
-
-                        {m.status === "error" && (
-                          <p className="text-sm" style={{ color: C.critical }}>{m.content}</p>
-                        )}
-
-                        {m.status === "done" &&
-                          (m.report ? <ReportDisplay data={m.report} C={C} /> : <MarkdownRenderer content={m.content} />)}
-                      </div>
-                    )}
-                  </motion.div>
-                ))}
-              </div>
+              <div className="w-full max-w-2xl mx-auto">{renderInputBox()}</div>
             </motion.div>
           )}
-        </AnimatePresence>
-
-        {isExpanded && (
-          <motion.div
-            initial={{ y: 40, opacity: 0 }}
-            animate={{ y: 0, opacity: 1, transition: { duration: 0.35, ease: "easeOut" } }}
-            className="px-6 pb-6 pt-2"
-          >
-            <div className="w-full max-w-2xl mx-auto">{renderInputBox()}</div>
-          </motion.div>
-        )}
-      </div>
+        </div>
+      )}
 
       <SensorDrawer open={drawerOpen} onClose={() => setDrawerOpen(false)} />
     </main>
   )
 }
 
-// ─── Root ─────────────────────────────────────────────────────────────────────
+// ─── Root Provider & Component ────────────────────────────────────────────────
 export default function Page() {
   const [mode, setMode] = useState<ThemeMode>("dark")
   const C = mode === "dark" ? DARK : LIGHT
   const toggle = () => setMode((m) => (m === "dark" ? "light" : "dark"))
 
+  // Navigation tab state
+  const [activeTab, setActiveTab] = useState<ViewTab>("conversations")
+
+  // Session & Chat state
+  const [sessions, setSessions] = useState<SessionItem[]>([])
+  const [activeSessionId, setActiveSessionId] = useState<string>(() => `session-${Date.now()}`)
+  const [isDraftSession, setIsDraftSession] = useState<boolean>(true)
+  const [messages, setMessages] = useState<ChatMessage[]>([])
+  const [loading, setLoading] = useState(false)
+  const [isExpanded, setIsExpanded] = useState(false)
+  const [agentsOn, setAgentsOn] = useState(false)
+  const [input, setInput] = useState("")
+
+  // Modal / Drawer states
+  const [openManuals, setOpenManuals] = useState(false)
+
+  // Fetch all sessions from backend
+  const refreshSessions = useCallback(async () => {
+    try {
+      const data = await getSessions()
+      if (data && Array.isArray(data.sessions)) {
+        setSessions(data.sessions)
+      }
+    } catch (err) {
+      console.warn("Could not fetch sessions from backend:", err)
+    }
+  }, [])
+
+  // Initial load: fetch sessions
+  useEffect(() => {
+    refreshSessions()
+  }, [refreshSessions])
+
+  // Select a session: load its conversation history
+  const handleSelectSession = useCallback(async (sessionId: string) => {
+    setActiveTab("conversations")
+    setActiveSessionId(sessionId)
+    setIsDraftSession(false)
+    setLoading(true)
+    setIsExpanded(true)
+
+    try {
+      const data = await getQaHistory(sessionId)
+      if (data.qa_pairs && data.qa_pairs.length > 0) {
+        const rehydrated: ChatMessage[] = data.qa_pairs.flatMap((entry) => {
+          const userMsg: ChatMessage = {
+            id: `hist-u-${entry.id}`,
+            role: "user",
+            content: entry.query,
+          }
+          const assistantMsg: ChatMessage = {
+            id: `hist-a-${entry.id}`,
+            role: "assistant",
+            content: entry.answer.summary || "",
+            status: "done",
+            report: historyEntryToReport(entry),
+          }
+          return [userMsg, assistantMsg]
+        })
+        setMessages(rehydrated)
+      } else {
+        setMessages([])
+        setIsExpanded(false)
+      }
+    } catch (err) {
+      console.error("Failed to load session history:", err)
+      setMessages([])
+    } finally {
+      setLoading(false)
+    }
+  }, [])
+
+  // Start a new session (ChatGPT-style: reset view, stage pending new session ID, no DB write yet)
+  const handleNewSession = useCallback(() => {
+    setActiveTab("conversations")
+    const newId = `session-${Date.now()}`
+    setActiveSessionId(newId)
+    setIsDraftSession(true)
+    setMessages([])
+    setInput("")
+    setIsExpanded(false)
+    setLoading(false)
+  }, [])
+
+  // Delete a session
+  const handleDeleteSession = useCallback(
+    async (e: React.MouseEvent, sessionId: string) => {
+      e.stopPropagation()
+      try {
+        await deleteSession(sessionId)
+        setSessions((prev) => prev.filter((s) => s.session_id !== sessionId))
+        // If the active session was deleted, reset to new session
+        if (activeSessionId === sessionId) {
+          handleNewSession()
+        }
+      } catch (err) {
+        console.error("Failed to delete session:", err)
+      }
+    },
+    [activeSessionId, handleNewSession]
+  )
+
+  // Send a message
+  const handleAsk = useCallback(
+    async (overrideQuestion?: string) => {
+      const question = (overrideQuestion ?? input).trim()
+      if (!question || loading) return
+
+      setActiveTab("conversations")
+      const userMsgId = `u-${Date.now()}`
+      const assistantMsgId = `a-${Date.now()}`
+      const targetSessionId = activeSessionId
+
+      setMessages((prev) => [
+        ...prev,
+        { id: userMsgId, role: "user", content: question },
+        { id: assistantMsgId, role: "assistant", content: "", status: "loading" },
+      ])
+
+      setInput("")
+      setIsExpanded(true)
+      setLoading(true)
+
+      try {
+        const data = await askInstructorAgent({
+          query: question,
+          session_id: targetSessionId,
+          use_agents: agentsOn,
+          ...(agentsOn && {
+            sensor_data: {
+              engine_temp: "normal, 480°C",
+              oil_pressure: "58 psi",
+              vibration: "1.2 IPS",
+              fault_codes: "none reported",
+              maintenance_history: "last inspected 40 flight hours ago",
+              operating_hours: "6200",
+              flight_cycles: "2100",
+            },
+            aircraft_info: { aircraft_model: "Boeing 737-800", engine_model: "CFM56-7B" },
+          }),
+        })
+
+        setMessages((prev) =>
+          prev.map((m) => (m.id === assistantMsgId ? { ...m, report: data, status: "done" } : m))
+        )
+
+        // If it was a draft session, it is now committed
+        setIsDraftSession(false)
+        await refreshSessions()
+      } catch (err) {
+        console.error("Ask query failed:", err)
+        setMessages((prev) =>
+          prev.map((m) =>
+            m.id === assistantMsgId
+              ? { ...m, content: "Couldn't reach the instructor agent backend.", status: "error" }
+              : m
+          )
+        )
+      } finally {
+        setLoading(false)
+      }
+    },
+    [input, loading, activeSessionId, agentsOn, refreshSessions]
+  )
+
+  const chatValue = {
+    activeTab,
+    setActiveTab,
+    sessions,
+    activeSessionId,
+    isDraftSession,
+    messages,
+    loading,
+    isExpanded,
+    agentsOn,
+    setAgentsOn,
+    input,
+    setInput,
+    handleAsk,
+    handleNewSession,
+    handleSelectSession,
+    handleDeleteSession,
+    refreshSessions,
+    openManuals,
+    setOpenManuals,
+  }
+
   return (
     <ThemeContext.Provider value={{ mode, toggle, C }}>
-      <div className="flex h-screen w-screen overflow-hidden" style={{ background: C.bg }}>
-        <SidebarProvider defaultOpen={true}>
-          <AppSidebar />
-          <ChatMain />
-        </SidebarProvider>
-      </div>
+      <ChatContext.Provider value={chatValue}>
+        <div className="flex h-screen w-screen overflow-hidden" style={{ background: C.bg }}>
+          <SidebarProvider defaultOpen={true}>
+            <AppSidebar />
+            <ChatMain />
+          </SidebarProvider>
+
+          {/* Drawers */}
+          <ManualsDrawer open={openManuals} onClose={() => setOpenManuals(false)} C={C} />
+        </div>
+      </ChatContext.Provider>
     </ThemeContext.Provider>
   )
-} 
+}

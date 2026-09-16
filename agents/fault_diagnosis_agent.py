@@ -44,4 +44,4 @@ def diagnose_fault(
 
     result = call_llm_json(prompt, default)
     print(f"[FaultDiagnosisAgent] {result}")
-    return result
+    return result, context

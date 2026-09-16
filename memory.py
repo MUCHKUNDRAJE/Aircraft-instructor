@@ -74,12 +74,13 @@ def _extract_answer(mode: str, data: dict) -> str:
         table = {
             "manual_key": data.get("manual_key"),
             "answer": data.get("answer"),
+            "context": data.get("context", ""),
         }
     else:  # multi_agent
         dt = data.get("digital_twin", {}) or {}
         summary = dt.get("twin_summary") or "No summary available."
         table = data  # the full report: fault_diagnosis, safety_compliance,
-                       # predictive_maintenance, parts_recommendation, digital_twin
+                       # predictive_maintenance, parts_recommendation, digital_twin, manual_key, context
 
     return json.dumps({"summary": summary, "table": table}, default=str)
 
@@ -202,6 +203,54 @@ class ConversationMemory:
         with _get_conn() as conn:
             conn.execute("DELETE FROM turns WHERE session_id = ?", (session_id,))
             conn.commit()
+
+    def get_sessions(self) -> list:
+        """
+        Returns all unique sessions from the database ordered by most recently active.
+        Each session dict contains:
+          - session_id: str
+          - title: str (the first query of the session)
+          - last_query: str (the most recent query)
+          - mode: str
+          - turn_count: int
+          - last_timestamp: str
+        """
+        with _get_conn() as conn:
+            cur = conn.execute("""
+                SELECT 
+                    session_id,
+                    COUNT(*) as turn_count,
+                    MIN(id) as first_id,
+                    MAX(id) as last_id,
+                    MAX(timestamp) as last_timestamp
+                FROM turns
+                GROUP BY session_id
+                ORDER BY last_id DESC
+            """)
+            summary_rows = cur.fetchall()
+
+            sessions = []
+            for session_id, turn_count, first_id, last_id, last_timestamp in summary_rows:
+                # Fetch first query for title
+                f_cur = conn.execute("SELECT query FROM turns WHERE id = ?", (first_id,))
+                first_row = f_cur.fetchone()
+                title = first_row[0] if first_row else "Session"
+
+                # Fetch last query & mode
+                l_cur = conn.execute("SELECT query, mode FROM turns WHERE id = ?", (last_id,))
+                last_row = l_cur.fetchone()
+                last_query = last_row[0] if last_row else title
+                last_mode = last_row[1] if last_row else "multi_agent"
+
+                sessions.append({
+                    "session_id": session_id,
+                    "title": title,
+                    "last_query": last_query,
+                    "mode": last_mode,
+                    "turn_count": turn_count,
+                    "last_timestamp": last_timestamp,
+                })
+        return sessions
 
     # -----------------------------------------------------------------
     # Context building — mode-aware summaries (used to feed prior context

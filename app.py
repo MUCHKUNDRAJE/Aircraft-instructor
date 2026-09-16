@@ -1,8 +1,9 @@
 import os
 from typing import Optional
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, UploadFile, File, Form
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
 from pdf_tools import (
@@ -11,12 +12,17 @@ from pdf_tools import (
     list_ingested_manuals,
     MANUAL_DIR,
     MANUAL_REGISTRY,
+    IMAGE_HOLDER_DIR,
 )
 from gemma_router import route_query, answer_query
 from agents.orchestrator import run_agent_pipeline
 from memory import conversation_memory
 
 app = FastAPI(title="Aircraft Maintenance API", version="1.0")
+
+# Mount image static files directory
+os.makedirs(IMAGE_HOLDER_DIR, exist_ok=True)
+app.mount("/images", StaticFiles(directory=IMAGE_HOLDER_DIR), name="images")
 
 # Allow the frontend (any origin during dev — tighten this for production)
 app.add_middleware(
@@ -105,7 +111,7 @@ def ask(
         conversation_memory.add_turn(
             session_id,
             query,
-            {"manual_key": manual_key, "answer": final_answer},
+            {"manual_key": manual_key, "answer": final_answer, "context": raw_results},
             mode="simple_rag",
         )
 
@@ -181,6 +187,16 @@ def clear_history(session_id: str):
         raise HTTPException(status_code=500, detail=str(e))
 
 
+@app.get("/sessions")
+def get_sessions():
+    """Returns a list of all distinct sessions with their titles, turn counts, and timestamps."""
+    try:
+        sessions = conversation_memory.get_sessions()
+        return {"sessions": sessions}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 @app.get("/manuals")
 def get_manuals():
     """Lists registered manuals and their ingestion status."""
@@ -221,6 +237,41 @@ def ingest_all():
         except Exception as e:
             results[key] = f"Error: {e}"
     return {"results": results}
+
+
+@app.post("/upload-manual")
+async def upload_manual(
+    file: UploadFile = File(...),
+    manual_key: str = Form(...),
+    description: str = Form(...),
+    two_column: bool = Form(False),
+):
+    """Uploads a PDF manual, registers it into MANUAL_REGISTRY, and automatically ingests it."""
+    try:
+        os.makedirs(MANUAL_DIR, exist_ok=True)
+        filename = file.filename or f"{manual_key}.pdf"
+        file_path = os.path.join(MANUAL_DIR, filename)
+
+        contents = await file.read()
+        with open(file_path, "wb") as f:
+            f.write(contents)
+
+        MANUAL_REGISTRY[manual_key] = {
+            "file": filename,
+            "description": description,
+            "two_column": two_column,
+        }
+
+        # Ingest the newly uploaded manual
+        ingest_res = ingest_pdf_to_vector_db.invoke({"pdf_filename": filename})
+        return {
+            "status": "success",
+            "manual_key": manual_key,
+            "filename": filename,
+            "ingest_result": ingest_res,
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
 
 
 if __name__ == "__main__":

@@ -23,7 +23,7 @@ def run_agent_pipeline(
     print(f"[LOG] [Orchestrator] Routed to manual: '{manual_key}'")
 
     print(f"[LOG] [Orchestrator] Agent 1: Fault Diagnosis...")
-    fault_diagnosis = diagnose_fault(query, manual_key, sensor_data, conversation_context)
+    fault_diagnosis, context = diagnose_fault(query, manual_key, sensor_data, conversation_context)
 
     print(f"[LOG] [Orchestrator] Agent 2: Safety & Compliance...")
     safety = check_safety_compliance(fault_diagnosis, manual_key)
@@ -54,6 +54,7 @@ def run_agent_pipeline(
 
     return {
         "manual_key": manual_key,
+        "context": context,
         "fault_diagnosis": fault_diagnosis,
         "safety_compliance": safety,
         "predictive_maintenance": predictive,

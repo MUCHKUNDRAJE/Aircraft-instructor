@@ -247,9 +247,11 @@ def search_manuals(query: str, manual_key: str) -> str:
             if images_str:
                 links = []
                 for img_name in images_str.split(","):
-                    img_path = os.path.join(IMAGE_HOLDER_DIR, img_name)
-                    img_url = "file:///" + img_path.replace("\\", "/")
-                    links.append(f"[{os.path.basename(img_name)}]({img_url})")
+                    if not img_name.strip():
+                        continue
+                    clean_name = img_name.strip().replace("\\", "/")
+                    img_url = f"http://localhost:8000/images/{clean_name}"
+                    links.append(f"![{os.path.basename(clean_name)}]({img_url})")
                 images_display = f"\nAssociated Images: {', '.join(links)}"
             print(f"[LOG] Match {i}: score={score:.4f}, source={source}, page={page}")
 
