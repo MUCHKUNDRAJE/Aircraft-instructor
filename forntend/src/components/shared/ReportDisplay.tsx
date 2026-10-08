@@ -790,7 +790,11 @@ function SimpleRagView({
 // ─── Root export ────────────────────────────────────────────────────────────────
 export default function ReportDisplay({ data, C }: { data: AskApiResponse; C: ColorTokens }) {
   if (data.mode === "multi_agent") {
-    return <MultiAgentReportView report={data.report} C={C} />
+    const reportWithContext = {
+      ...data.report,
+      context: data.report.context || data.context || "",
+    }
+    return <MultiAgentReportView report={reportWithContext} C={C} />
   }
   if (data.mode === "direct_memory_answer") {
     return (
