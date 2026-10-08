@@ -39,3 +39,9 @@ yarn-error.log*
 # typescript
 *.tsbuildinfo
 next-env.d.ts
+
+# ensure library files in frontend are tracked
+!src/lib/
+!src/lib/**
+!lib/
+!lib/**
